@@ -6,6 +6,7 @@ const flicapp = require('flicapp');
 const dgram = require('dgram');
 const http = require('http');
 const net = require('net');
+const rawHttp = require('./raw-http');
 
 // -----------------
 // Configuration
@@ -125,6 +126,19 @@ const httpCall = async (options) => {
       resolve(res);
     });
   });
+};
+
+const subscribeCall = async (options) => {
+  logger.debug('Raw HTTP Options:', JSON.stringify(options, null, '\t'));
+  const response = await rawHttp.makeRequest(options);
+
+  if (response.statusCode !== 200) {
+    throw new Error(
+      `API Error: ${response.statusCode} ${response.statusMessage}`,
+    );
+  }
+
+  return response;
 };
 
 const createSsdpSearchMessage = (searchTarget) =>
@@ -590,7 +604,7 @@ const renewSubscription = (virtualDeviceId) => {
     },
   };
 
-  return httpCall(options)
+  return subscribeCall(options)
     .then((response) => {
       const nextSid = getHeaderValue(response.headers, 'sid') || record.sid;
       logger.debug(`UPNP Renewed: ${virtualDeviceId}`);
@@ -687,12 +701,7 @@ const subscribeToNotifications = (virtualDeviceId, serverAddress) => {
     },
   };
 
-  // Can't actually init subscription because Flic doesn't support SUBSCRIBE http verb
-  // curl -v http://192.168.1.237:59152/upnp/event/rendercontrol1 -H "CALLBACK: <http://192.168.1.177:44444/Guest%20Speakers>" -H "NT: upnp:event" -H "TIMEOUT: Second-1800" -X SUBSCRIBE
-  logger.info(`Would have subscribed to ${device.name} if I could`);
-  return;
-
-  return httpCall(options)
+  return subscribeCall(options)
     .then((response) => {
       const sid = getHeaderValue(response.headers, 'sid');
       logger.info(`UPNP Subscribed: ${virtualDeviceId}`);
@@ -795,7 +804,11 @@ const parseUpnpEvent = (payload) => {
   }
 
   const deviceMatch = payload.match(/NOTIFY \/(\S+)/);
-  const volumeMatch = payload.match(/Volume.+val="(\d+)"/);
+  const volumeMatch =
+    payload.match(
+      /\bVolume\b(?:\s+[A-Za-z_:][\w:.-]*="[^"]*")*\s+val="(\d+)"/,
+    ) ||
+    payload.match(/\bSlaveVolume="(\d+)"/);
 
   const virtualDeviceId = deviceMatch ? decodeURI(deviceMatch[1]) : null;
   const volume = volumeMatch ? Number(volumeMatch[1]) : null;
@@ -805,6 +818,9 @@ const parseUpnpEvent = (payload) => {
 
 const createCallbackServer = () => {
   const server = new net.Server((socket) => {
+    let payload = '';
+    let handled = false;
+
     socket.on('error', (error) => {
       logger.error(error);
     });
@@ -814,14 +830,28 @@ const createCallbackServer = () => {
     });
 
     socket.on('data', (data) => {
-      const payload = data.toString();
+      payload += data.toString();
+
+      const headerEnd = payload.indexOf('\r\n\r\n');
+      if (headerEnd === -1 || handled) {
+        return;
+      }
+
+      const headers = payload.slice(0, headerEnd);
+      const contentLengthMatch = headers.match(/(?:^|\r\n)CONTENT-LENGTH:\s*(\d+)/i);
+      const contentLength = contentLengthMatch ? Number(contentLengthMatch[1]) : 0;
+      if (payload.length < headerEnd + 4 + contentLength) {
+        return;
+      }
+
+      handled = true;
       logger.debug('Callback Received:', SEPARATOR, payload, SEPARATOR);
 
       const { virtualDeviceId, volume } = parseUpnpEvent(payload);
 
       if (!virtualDeviceId) {
         logger.error('UPNP Event: Missing virtual device identifier', payload);
-        socket.end('OK');
+        socket.end('HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n');
         return;
       }
 
@@ -832,10 +862,12 @@ const createCallbackServer = () => {
         });
         logger.info(`Virtual Device Updated: ${virtualDeviceId} - ${volume}`);
       } else {
-        logger.error(`UPNP Event: ${virtualDeviceId} - Unrecognized event`, payload);
+        logger.debug(`UPNP Event: ${virtualDeviceId} - No volume change`, payload);
       }
 
-      socket.end('OK');
+      socket.end(
+        'HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n',
+      );
     });
   });
   
