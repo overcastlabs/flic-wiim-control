@@ -3,6 +3,7 @@
 const flicapp = require('flicapp');
 const http = require('http');
 const net = require('net');
+const network = require('network');
 const rawHttp = require('./raw-http');
 
 const DEBUG = false;
@@ -11,7 +12,6 @@ const DEBUG = false;
 // Configuration
 // -----------------
 const SEPARATOR = '-------------';
-const FLIC_ADDRESS = '192.168.1.177';
 const UPNP_PORT = '59152';
 const CALLBACK_PORT = 44444;
 const SUBSCRIPTION_TIMEOUT_SECONDS = 30;
@@ -36,6 +36,21 @@ const logger = {
       console.log(...args);
     }
   },
+};
+
+const getHubAddress = () => {
+  const state = network.getState();
+  const ethernet = state?.dhcp?.ethernet;
+  const wifi = state?.dhcp?.wifi;
+
+  if (ethernet?.connected && ethernet.ip) {
+    return ethernet.ip;
+  }
+  if (wifi?.connected && wifi.ip) {
+    return wifi.ip;
+  }
+
+  return null;
 };
 
 // -----------------
@@ -286,11 +301,18 @@ const subscribeToNotifications = (virtualDeviceId, serverAddress) => {
     return;
   }
 
+  const hubAddress = getHubAddress();
+  if (!hubAddress) {
+    logger.error('Unable to subscribe, Flic Hub network address unavailable');
+    scheduleSubscriptionRestart(virtualDeviceId, serverAddress);
+    return;
+  }
+
   const options = {
     url: `${host}/upnp/event/rendercontrol1`,
     method: 'SUBSCRIBE',
     headers: {
-      CALLBACK: `<http://${FLIC_ADDRESS}:${serverAddress.port}/${encodeURI(
+      CALLBACK: `<http://${hubAddress}:${serverAddress.port}/${encodeURI(
         virtualDeviceId,
       )}>`,
       NT: 'upnp:event',

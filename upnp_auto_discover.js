@@ -6,12 +6,12 @@ const flicapp = require('flicapp');
 const dgram = require('dgram');
 const http = require('http');
 const net = require('net');
+const network = require('network');
 const rawHttp = require('./raw-http');
 
 // -----------------
 // Configuration
 // -----------------
-const FLIC_ADDRESS = '192.168.1.177';
 const DEBUG = false;
 
 // -----------------
@@ -39,6 +39,21 @@ const logger = {
       console.log(`DEBUG: ${args.shift()}`, ...args);
     }
   },
+};
+
+const getHubAddress = () => {
+  const state = network.getState();
+  const ethernet = state?.dhcp?.ethernet;
+  const wifi = state?.dhcp?.wifi;
+
+  if (ethernet?.connected && ethernet.ip) {
+    return ethernet.ip;
+  }
+  if (wifi?.connected && wifi.ip) {
+    return wifi.ip;
+  }
+
+  return null;
 };
 
 // -----------------
@@ -685,6 +700,18 @@ const subscribeToNotifications = (virtualDeviceId, serverAddress) => {
     return;
   }
 
+  const hubAddress = getHubAddress();
+  if (!hubAddress) {
+    logger.error('Unable to subscribe, Flic Hub network address unavailable');
+    queueRetry({
+      virtualDeviceId,
+      nextState: SUBSCRIPTION_STATE.SUBSCRIBING,
+      action: () => subscribeToNotifications(virtualDeviceId, serverAddress),
+      serverAddress,
+    });
+    return;
+  }
+
   transitionSubscription(virtualDeviceId, SUBSCRIPTION_STATE.SUBSCRIBING, {
     serverAddress,
   });
@@ -693,7 +720,7 @@ const subscribeToNotifications = (virtualDeviceId, serverAddress) => {
     url: device.eventUrl,
     method: 'SUBSCRIBE',
     headers: {
-      CALLBACK: `<http://${FLIC_ADDRESS}:${serverAddress.port}/${encodeURI(
+      CALLBACK: `<http://${hubAddress}:${serverAddress.port}/${encodeURI(
         virtualDeviceId,
       )}>`,
       NT: 'upnp:event',
