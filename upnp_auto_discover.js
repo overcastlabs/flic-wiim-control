@@ -20,9 +20,11 @@ const DEBUG = false;
 const SEPARATOR = '-------------';
 const CALLBACK_PORT = 44445;
 const SUBSCRIPTION_TIMEOUT_SECONDS = 10 * 60; // 10min
-const SUBSCRIPTION_RENEWAL_MARGIN_SECONDS = 5;
+const SUBSCRIPTION_RENEWAL_MARGIN_SECONDS = 60;
+const SUBSCRIPTION_RENEWAL_STAGGER_SECONDS = 30;
 const SUBSCRIPTION_RETRY_DELAY_MS = 5000;
 const SUBSCRIPTION_MAX_RETRIES = 5;
+const HEALTH_LOG_INTERVAL_MS = 5 * 60 * 1000;
 const SSDP_MULTICAST_ADDRESS = '239.255.255.250';
 const SSDP_PORT = 1900;
 const SSDP_DISCOVERY_MX = 3; // SSDP device response jitter in seconds
@@ -30,6 +32,7 @@ const SSDP_DISCOVERY_TIMEOUT_MS = SSDP_DISCOVERY_MX * 1000 + 250;
 const WIIM_DEVICE_SERVICE_TYPE = 'urn:schemas-upnp-org:device:MediaRenderer:1';
 const SSDP_SEARCH_TARGETS = ['upnp:rootdevice', WIIM_DEVICE_SERVICE_TYPE];
 const UPNP_MEDIA_RENDERER_SERVICE_SCHEMA = 'urn:schemas-upnp-org:service:RenderingControl:1';
+const WIIM_SLAVE_LIST_PATH = '/httpapi.asp?command=multiroom:getSlaveList';
 
 const logger = {
   info: (...args) => console.log(`INFO: ${args.shift()}`, ...args),
@@ -337,6 +340,71 @@ const fetchDeviceDescription = (location) => {
     });
 };
 
+const replaceLocationHost = (location, host) => {
+  const match = location.match(/^(https?:\/\/)(?:\[[^\]]+\]|[^/:]+)(:\d+)?(\/.*)$/i);
+  if (!match) {
+    return null;
+  }
+
+  return `${match[1]}${host}${match[2] || ''}${match[3]}`;
+};
+
+const fetchGroupedDevices = (master) => {
+  const parsedLocation = splitLocation(master.location);
+  if (!parsedLocation) {
+    return Promise.resolve([]);
+  }
+
+  const masterHost = parsedLocation.host.replace(/:\d+$/, '');
+  return rawHttp
+    .makeRequest({
+      url: `https://${masterHost}${WIIM_SLAVE_LIST_PATH}`,
+      method: 'GET',
+      // WiiM uses a device-generated certificate on its local HTTPS API.
+      rejectUnauthorized: false,
+    })
+    .then((response) => {
+      if (response.statusCode !== 200) {
+        throw new Error(
+          `API Error: ${response.statusCode} ${response.statusMessage}`,
+        );
+      }
+
+      const topology = JSON.parse(response.content);
+      const slaves = Array.isArray(topology.slave_list) ? topology.slave_list : [];
+
+      return (async () => {
+        const devices = [];
+        for (const slave of slaves) {
+          if (!slave.ip) {
+            continue;
+          }
+
+          const location = replaceLocationHost(master.location, slave.ip);
+          if (!location) {
+            logger.error(`Unable to construct UPnP location for ${slave.name}`);
+            continue;
+          }
+
+          devices.push(await fetchDeviceDescription(location));
+        }
+        return devices;
+      })();
+    })
+    .catch((error) => {
+      logger.error(`Failed to discover grouped devices for ${master.name}`, error);
+      return [];
+    });
+};
+
+const discoverGroupedDevices = async () => {
+  const visibleDevices = Array.from(wiimDevices.values());
+  for (const master of visibleDevices) {
+    const devices = await fetchGroupedDevices(master);
+    devices.forEach((device) => registerDiscoveredDevice(device));
+  }
+};
+
 const registerDiscoveredDevice = (device) => {
   if (!device) {
     return false;
@@ -354,6 +422,18 @@ const registerDiscoveredDevice = (device) => {
 
   wiimDevices.set(device.name, device);
   logger.info(`Discovered Wiim device: ${device.name} (${device.baseUrl})`);
+
+  const pendingVolume = pendingVolumeUpdates.get(device.name);
+  if (typeof pendingVolume === 'number') {
+    pendingVolumeUpdates.delete(device.name);
+    logger.info(`Applying queued Twist volume for ${device.name}: ${pendingVolume}`);
+    performSoapAction(device.name, 'SetVolume', {
+      InstanceID: 0,
+      Channel: 'Single',
+      DesiredVolume: pendingVolume,
+    });
+  }
+
   return true;
 };
 
@@ -380,6 +460,7 @@ const discoverWiimDevices = (timeoutMs = SSDP_DISCOVERY_TIMEOUT_MS) => {
       }
 
       Promise.all(Array.from(pendingDescriptions))
+        .then(() => discoverGroupedDevices())
         .catch((error) => logger.error('Error resolving discovery promises', error))
         .finally(() => {
           if (wiimDevices.size === 0) {
@@ -445,7 +526,9 @@ const discoverWiimDevices = (timeoutMs = SSDP_DISCOVERY_TIMEOUT_MS) => {
       }, 750);
     });
 
-    socket.bind(SSDP_PORT);
+    // M-SEARCH responses return to the sender's source port, so an ephemeral
+    // port avoids competing with the hub's own SSDP service on port 1900.
+    socket.bind(0);
 
     setTimeout(() => {
       finalize();
@@ -455,22 +538,8 @@ const discoverWiimDevices = (timeoutMs = SSDP_DISCOVERY_TIMEOUT_MS) => {
 
 const subscriptions = new Map();
 const wiimDevices = new Map();
+const pendingVolumeUpdates = new Map();
 let callbackServerAddress = null;
-let ssdpAnnouncementSocket = null;
-
-const hasDeviceWithLocation = (location) => {
-  if (!location) {
-    return false;
-  }
-
-  for (const device of wiimDevices.values()) {
-    if (device.location === location) {
-      return true;
-    }
-  }
-
-  return false;
-};
 
 const SUBSCRIPTION_STATE = {
   IDLE: 'idle',
@@ -565,9 +634,15 @@ const queueRetry = ({
 };
 
 const scheduleRenewal = (virtualDeviceId) => {
+  const staggerSeconds = Array.from(virtualDeviceId).reduce(
+    (hash, character) => (hash + character.charCodeAt(0)) % SUBSCRIPTION_RENEWAL_STAGGER_SECONDS,
+    0,
+  );
   const delaySeconds = Math.max(
     1,
-    SUBSCRIPTION_TIMEOUT_SECONDS - SUBSCRIPTION_RENEWAL_MARGIN_SECONDS,
+    SUBSCRIPTION_TIMEOUT_SECONDS -
+      SUBSCRIPTION_RENEWAL_MARGIN_SECONDS +
+      staggerSeconds,
   );
 
   const timer = setTimeout(() => {
@@ -766,65 +841,6 @@ const subscribeToNotifications = (virtualDeviceId, serverAddress) => {
     });
 };
 
-const startSsdpAnnouncementListener = () => {
-  const socket = dgram.createSocket({ type: 'udp4', reuseAddr: true });
-
-  socket.on('error', (error) => {
-    logger.error('SSDP announcement socket error', error);
-  });
-
-  socket.on('listening', () => {
-    const { address, port } = socket.address();
-    logger.info(`Listening for SSDP announcements on ${address}:${port}`);
-
-    try {
-      socket.addMembership(SSDP_MULTICAST_ADDRESS);
-    } catch (error) {
-      logger.error('Failed to join SSDP multicast group', error);
-    }
-  });
-
-  socket.on('message', (message) => {
-    const payload = message.toString();
-    const headers = parseSsdpHeaders(payload);
-    const notificationType = headers.nts ? headers.nts.toLowerCase() : null;
-
-    if (notificationType !== 'ssdp:alive') {
-      return;
-    }
-
-    const searchTarget = headers.nt || headers.st;
-    if (!isMediaRenderer(searchTarget)) {
-      return;
-    }
-
-    const location = headers.location;
-    if (!location || hasDeviceWithLocation(location)) {
-      return;
-    }
-
-    logger.info(`SSDP announcement detected for ${location}`);
-    fetchDeviceDescription(location).then((device) => {
-      const isNewDevice = registerDiscoveredDevice(device);
-      if (!isNewDevice || !device) {
-        return;
-      }
-
-      if (!callbackServerAddress) {
-        logger.error(
-          `Callback server address unavailable; skipping subscription for ${device.name}`,
-        );
-        return;
-      }
-
-      subscribeToNotifications(device.name, callbackServerAddress);
-    });
-  });
-
-  socket.bind(SSDP_PORT);
-  return socket;
-};
-
 const parseUpnpEvent = (payload) => {
   if (!payload) {
     return {};
@@ -903,39 +919,40 @@ const createCallbackServer = () => {
 
 const callbackServer = createCallbackServer();
 
+callbackServer.on('error', (error) => {
+  logger.error('UPNP callback server error', error);
+});
+
 callbackServer.listen(CALLBACK_PORT, async () => {
-  const serverAddress = callbackServer.address();
-  if (!serverAddress) {
-    logger.error(new Error('Callback server address unavailable'));
-    return;
-  }
+  try {
+    const serverAddress = callbackServer.address();
+    if (!serverAddress) {
+      logger.error(new Error('Callback server address unavailable'));
+      return;
+    }
 
-  callbackServerAddress = serverAddress;
+    callbackServerAddress = serverAddress;
 
-  logger.info(
-    `Listening on ${serverAddress.address}:${serverAddress.port}`,
-    SEPARATOR,
-  );
-
-  await discoverWiimDevices();
-  if (wiimDevices.size === 0) {
-    logger.error(
-      'No Wiim devices discovered; waiting for SSDP announcements to initialize subscriptions',
+    logger.info(
+      `Listening on ${serverAddress.address}:${serverAddress.port}`,
+      SEPARATOR,
     );
-  } else {
-    await Promise.all(
-      Array.from(wiimDevices.keys()).map((virtualDeviceId) =>
-        subscribeToNotifications(virtualDeviceId, serverAddress),
-      ),
-    );
-  }
 
-  if (!ssdpAnnouncementSocket) {
-    ssdpAnnouncementSocket = startSsdpAnnouncementListener();
-  }
+    await discoverWiimDevices();
+    if (wiimDevices.size === 0) {
+      logger.error(
+        'No Wiim devices discovered; restart the module to retry discovery',
+      );
+    } else {
+      for (const virtualDeviceId of wiimDevices.keys()) {
+        await subscribeToNotifications(virtualDeviceId, serverAddress);
+      }
+    }
 
-  // Prevent the async listen callback from resolving so QuickJS keeps the module alive.
-  await new Promise(() => {});
+    logger.info('Wiim discovery and subscriptions initialized');
+  } catch (error) {
+    logger.error('Wiim initialization failed', error);
+  }
 });
 
 const handleVirtualDeviceUpdate = (metaData, values) => {
@@ -951,6 +968,12 @@ const handleVirtualDeviceUpdate = (metaData, values) => {
   const desiredVolume = normalizeVolume(numericVolume);
   logger.info(`Twist Event: ${virtualDeviceId} - ${desiredVolume}`);
 
+  if (!wiimDevices.has(virtualDeviceId)) {
+    pendingVolumeUpdates.set(virtualDeviceId, desiredVolume);
+    logger.info(`Queued Twist volume until discovery finds ${virtualDeviceId}`);
+    return;
+  }
+
   performSoapAction(virtualDeviceId, 'SetVolume', {
     InstanceID: 0,
     Channel: 'Single',
@@ -959,3 +982,12 @@ const handleVirtualDeviceUpdate = (metaData, values) => {
 };
 
 flicapp.on('virtualDeviceUpdate', throttle(handleVirtualDeviceUpdate));
+
+setInterval(() => {
+  const activeSubscriptions = Array.from(subscriptions.values()).filter(
+    (subscription) => subscription.state === SUBSCRIPTION_STATE.SUBSCRIBED,
+  ).length;
+  logger.info(
+    `Wiim service healthy (${wiimDevices.size} devices, ${activeSubscriptions} subscriptions)`,
+  );
+}, HEALTH_LOG_INTERVAL_MS);

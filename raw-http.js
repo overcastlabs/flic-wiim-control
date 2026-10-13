@@ -1,17 +1,20 @@
 'use strict';
 
 const net = require('net');
+const tls = require('tls');
 
 const parseHttpUrl = (url) => {
-  const match = /^http:\/\/([^/:]+)(?::(\d+))?(\/.*)?$/.exec(url);
+  const match = /^(https?):\/\/([^/:]+)(?::(\d+))?(\/.*)?$/.exec(url);
   if (!match) {
-    throw new Error(`Raw HTTP only supports http:// URLs: ${url}`);
+    throw new Error(`Invalid HTTP URL: ${url}`);
   }
 
+  const protocol = match[1];
   return {
-    host: match[1],
-    port: match[2] ? Number(match[2]) : 80,
-    path: match[3] || '/',
+    protocol,
+    host: match[2],
+    port: match[3] ? Number(match[3]) : protocol === 'https' ? 443 : 80,
+    path: match[4] || '/',
   };
 };
 
@@ -44,7 +47,7 @@ const parseResponseHead = (head) => {
 };
 
 /**
- * Sends one HTTP/1.1 request over a raw Flic `net.Socket`.
+ * Sends one HTTP/1.1 request over a raw Flic TCP or TLS socket.
  * Intended for verbs, such as SUBSCRIBE, rejected by `http.makeRequest`.
  */
 const makeRequest = (options) =>
@@ -64,7 +67,9 @@ const makeRequest = (options) =>
       Object.keys(headers).some((key) => key.toLowerCase() === name);
 
     if (!hasHeader('host')) {
-      headers.Host = target.port === 80 ? target.host : `${target.host}:${target.port}`;
+      const defaultPort = target.protocol === 'https' ? 443 : 80;
+      headers.Host =
+        target.port === defaultPort ? target.host : `${target.host}:${target.port}`;
     }
     if (!hasHeader('connection')) {
       headers.Connection = 'close';
@@ -80,15 +85,19 @@ const makeRequest = (options) =>
       content,
     ].join('\r\n');
 
-    const socket = new net.Socket();
+    let socket;
     let response = '';
     let settled = false;
+    let timeoutTimer = null;
 
     const fail = (error) => {
       if (settled) {
         return;
       }
       settled = true;
+      if (timeoutTimer !== null) {
+        clearTimeout(timeoutTimer);
+      }
       reject(error instanceof Error ? error : new Error(String(error)));
     };
 
@@ -118,27 +127,56 @@ const makeRequest = (options) =>
       }
 
       settled = true;
+      if (timeoutTimer !== null) {
+        clearTimeout(timeoutTimer);
+      }
       result.content = content.slice(0, contentLength || content.length);
       resolve(result);
       socket.destroy();
     };
 
-    socket.on('data', (data) => {
-      // Some Flic Hub firmware exposes Buffer data but not Socket#setEncoding,
-      // despite setEncoding being present in newer SDK documentation.
-      response += data.toString();
-      finish();
-    });
-    socket.on('error', fail);
-    socket.on('end', () => {
-      finish();
-      if (!settled) {
-        fail(new Error('Connection ended before a complete HTTP response was received'));
+    const attachListeners = () => {
+      socket.on('data', (data) => {
+        // Some Flic Hub firmware exposes Buffer data but not Socket#setEncoding,
+        // despite setEncoding being present in newer SDK documentation.
+        response += data.toString();
+        finish();
+      });
+      socket.on('error', fail);
+      socket.on('end', () => {
+        finish();
+        if (!settled) {
+          fail(new Error('Connection ended before a complete HTTP response was received'));
+        }
+      });
+    };
+
+    if (target.protocol === 'https') {
+      socket = tls.connect(
+        {
+          host: target.host,
+          port: target.port,
+          rejectUnauthorized: options.rejectUnauthorized !== false,
+        },
+        () => socket.write(request),
+      );
+      attachListeners();
+    } else {
+      socket = new net.Socket();
+      attachListeners();
+      socket.connect(target.port, target.host, () => {
+        socket.write(request);
+      });
+    }
+
+    const timeoutMs = options.timeoutMs || 10000;
+    timeoutTimer = setTimeout(() => {
+      if (settled) {
+        return;
       }
-    });
-    socket.connect(target.port, target.host, () => {
-      socket.write(request);
-    });
+      fail(new Error(`HTTP request timed out after ${timeoutMs}ms: ${options.url}`));
+      socket.destroy();
+    }, timeoutMs);
   });
 
 module.exports = { makeRequest };
