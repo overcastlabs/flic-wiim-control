@@ -3,6 +3,7 @@
 const assert = require('assert');
 const { isCompleteRequest } = require('../event-server');
 const {
+  createSoapBody,
   normalizeVolume,
   parseDeviceDescription,
   parseEvent,
@@ -27,6 +28,10 @@ const description = `
       <serviceType>urn:schemas-upnp-org:service:RenderingControl:1</serviceType>
       <controlURL>/upnp/control/rendercontrol1</controlURL>
       <eventSubURL>/upnp/event/rendercontrol1</eventSubURL>
+    </service><service>
+      <serviceType>urn:schemas-upnp-org:service:AVTransport:1</serviceType>
+      <controlURL>/upnp/control/rendertransport1</controlURL>
+      <eventSubURL>/upnp/event/rendertransport1</eventSubURL>
     </service></serviceList>
   </device></root>`;
 const device = parseDeviceDescription(
@@ -35,9 +40,21 @@ const device = parseDeviceDescription(
 );
 assert.strictEqual(device.name, 'Office Speakers');
 assert.strictEqual(
-  device.eventUrl,
+  device.renderingEventUrl,
   'http://192.168.1.10:49152/upnp/event/rendercontrol1',
 );
+assert.strictEqual(
+  device.avTransportControlUrl,
+  'http://192.168.1.10:49152/upnp/control/rendertransport1',
+);
+
+const playBody = createSoapBody(
+  'urn:schemas-upnp-org:service:AVTransport:1',
+  'Play',
+  { InstanceID: 0, Speed: 1 },
+);
+assert.match(playBody, /<u:Play xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">/);
+assert.match(playBody, /<Speed>1<\/Speed>/);
 
 const standardEvent = parseEvent(
   'NOTIFY /Office%20Speakers HTTP/1.1\r\n\r\n&lt;Volume channel="Master" val="28"/&gt;',

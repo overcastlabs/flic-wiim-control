@@ -12,10 +12,12 @@ UPnP volume events, and sends RenderingControl actions for Flic Twist changes.
 - Implements the unsupported HTTP `SUBSCRIBE` verb over raw TCP.
 - Renews subscriptions with staggered scheduling and bounded retries.
 - Synchronizes volume changes made through other WiiM clients back to Flic.
+- Handles play, pause, stop, next, previous, and preset action messages.
 
 ## Files
 
 - `main.js` — application lifecycle and Flic event wiring.
+- `action-message.js` — validation for configured Flic action messages.
 - `config.js` — user-facing runtime configuration.
 - `wiim-discovery.js` — SSDP and grouped-device discovery.
 - `wiim-controller.js` — UPnP RenderingControl actions.
@@ -44,11 +46,33 @@ WiiM's local topology API uses a device-generated TLS certificate. Certificate
 verification is disabled only for that LAN topology request; UPnP device
 control and event traffic use plain HTTP on the device's advertised port.
 
+## Media controls and presets
+
+Flic virtual speakers expose volume updates but do not emit dedicated media
+button events. Configure a **Message** action in the Flic app using one of these
+formats:
+
+```text
+Guest Room Speakers|play
+Guest Room Speakers|pause
+Guest Room Speakers|stop
+Guest Room Speakers|next
+Guest Room Speakers|previous
+Guest Room Speakers|preset|1
+```
+
+The device name must exactly match the WiiM friendly name printed during
+discovery. Transport messages use the standard UPnP AVTransport service.
+Preset messages play an existing WiiM preset through
+`MCUKeyShortClick:<number>`; supported slots are 1–12. WiiM's HTTP API does not
+provide a way to create, edit, or reorder presets.
+
 ## Tests
 
 The pure protocol tests run with Node.js and do not access the local network:
 
 ```sh
+node tests/action-message.test.js
 node tests/upnp-protocol.test.js
 ```
 

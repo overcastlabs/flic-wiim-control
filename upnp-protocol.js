@@ -1,6 +1,6 @@
 'use strict';
 
-const { renderingControlService } = require('./config');
+const { avTransportService, renderingControlService } = require('./config');
 
 const clamp = (value, minimum, maximum) =>
   Math.min(maximum, Math.max(minimum, value));
@@ -23,7 +23,7 @@ const getHeaderValue = (headers, targetName) => {
   return undefined;
 };
 
-const createSoapBody = (action, properties = {}) => {
+const createSoapBody = (serviceType, action, properties = {}) => {
   const payload = Object.entries(properties)
     .map(([name, value]) => `<${name}>${value}</${name}>`)
     .join('');
@@ -31,7 +31,7 @@ const createSoapBody = (action, properties = {}) => {
   return `<?xml version="1.0"?>
 <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
   <s:Body>
-    <u:${action} xmlns:u="${renderingControlService}">${payload}</u:${action}>
+    <u:${action} xmlns:u="${serviceType}">${payload}</u:${action}>
   </s:Body>
 </s:Envelope>`;
 };
@@ -70,19 +70,19 @@ const resolveUrl = (baseLocation, relativeUrl) => {
   return `${base.protocol}://${base.host}${baseDirectory}${relativeUrl}`;
 };
 
-const extractRenderingControlService = (xml) => {
+const extractService = (xml, serviceType) => {
   const servicePattern = /<service>([\s\S]*?)<\/service>/gi;
   let match;
 
   while ((match = servicePattern.exec(xml)) !== null) {
     const service = match[1];
-    if (!service.includes(renderingControlService)) {
+    if (!service.includes(serviceType)) {
       continue;
     }
 
     const controlUrl = extractXmlTagValue(service, 'controlURL');
     const eventUrl = extractXmlTagValue(service, 'eventSubURL');
-    if (controlUrl && eventUrl) {
+    if (controlUrl) {
       return { controlUrl, eventUrl };
     }
   }
@@ -97,9 +97,16 @@ const parseDeviceDescription = (xml, location) => {
 
   const name = extractXmlTagValue(xml, 'friendlyName');
   const model = extractXmlTagValue(xml, 'modelName');
-  const service = extractRenderingControlService(xml);
+  const renderingControl = extractService(xml, renderingControlService);
+  const avTransport = extractService(xml, avTransportService);
   const parsedLocation = splitLocation(location);
-  if (!name || !model || !service || !parsedLocation) {
+  if (
+    !name ||
+    !model ||
+    !renderingControl?.eventUrl ||
+    !avTransport ||
+    !parsedLocation
+  ) {
     return null;
   }
 
@@ -108,8 +115,9 @@ const parseDeviceDescription = (xml, location) => {
     model,
     location,
     baseUrl: `${parsedLocation.protocol}://${parsedLocation.host}`,
-    controlUrl: resolveUrl(location, service.controlUrl),
-    eventUrl: resolveUrl(location, service.eventUrl),
+    renderingControlUrl: resolveUrl(location, renderingControl.controlUrl),
+    renderingEventUrl: resolveUrl(location, renderingControl.eventUrl),
+    avTransportControlUrl: resolveUrl(location, avTransport.controlUrl),
     usn: extractXmlTagValue(xml, 'UDN'),
   };
 };

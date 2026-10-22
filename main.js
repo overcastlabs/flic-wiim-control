@@ -1,6 +1,7 @@
 'use strict';
 
 const flicapp = require('flicapp');
+const { parseActionMessage } = require('./action-message');
 const config = require('./config');
 const { createEventServer } = require('./event-server');
 const logger = require('./logger');
@@ -52,26 +53,47 @@ const throttle = (handler, delayMs = 125) => {
   };
 };
 
-const handleVolumeUpdate = (metadata, values) => {
-  const numericVolume =
-    typeof values.volume === 'number' ? values.volume : Number(values.volume);
-  if (Number.isNaN(numericVolume)) {
-    logger.error('Ignoring invalid Twist volume update', values);
+const handleVolumeUpdate = ({ virtualDeviceId }, { volume }) => {
+  if (!Number.isFinite(volume)) {
+    logger.error('Ignoring invalid Twist volume update', volume);
     return;
   }
 
-  const volume = normalizeVolume(numericVolume);
-  if (!devices.has(metadata.virtualDeviceId)) {
-    pendingVolumes.set(metadata.virtualDeviceId, volume);
-    logger.info(`Queued volume until discovery finds ${metadata.virtualDeviceId}`);
+  const normalizedVolume = normalizeVolume(volume);
+  if (!devices.has(virtualDeviceId)) {
+    pendingVolumes.set(virtualDeviceId, normalizedVolume);
+    logger.info(`Queued volume until discovery finds ${virtualDeviceId}`);
     return;
   }
 
-  logger.info(`Twist volume event: ${metadata.virtualDeviceId} - ${volume}`);
-  controller.setVolume(metadata.virtualDeviceId, volume);
+  logger.info(`Twist volume event: ${virtualDeviceId} - ${normalizedVolume}`);
+  controller.setVolume(virtualDeviceId, normalizedVolume);
+};
+
+const handleActionMessage = (message) => {
+  let action;
+  try {
+    action = parseActionMessage(message);
+  } catch (error) {
+    logger.error('Ignoring invalid action message', error);
+    return;
+  }
+
+  if (!devices.has(action.deviceId)) {
+    logger.error(`Action targets an unknown WiiM device: ${action.deviceId}`);
+    return;
+  }
+
+  logger.info(`Action message: ${action.deviceId} - ${action.command}`);
+  if (action.command === 'preset') {
+    controller.playPreset(action.deviceId, action.preset);
+    return;
+  }
+  controller.sendTransportCommand(action.deviceId, action.command);
 };
 
 flicapp.on('virtualDeviceUpdate', throttle(handleVolumeUpdate));
+flicapp.on('actionMessage', handleActionMessage);
 
 eventServer.on('error', (error) => {
   logger.error('UPnP callback server error', error);

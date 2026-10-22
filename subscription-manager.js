@@ -104,7 +104,7 @@ const createSubscriptionManager = ({ devices }) => {
 
     try {
       const response = await rawRequest({
-        url: device.eventUrl,
+        url: device.renderingEventUrl,
         method: 'SUBSCRIBE',
         headers: {
           SID: record.sid,
@@ -146,7 +146,7 @@ const createSubscriptionManager = ({ devices }) => {
 
     try {
       const response = await rawRequest({
-        url: device.eventUrl,
+        url: device.renderingEventUrl,
         method: 'SUBSCRIBE',
         headers: {
           CALLBACK: `<http://${hubAddress}:${serverAddress.port}/${encodeURI(deviceId)}>`,

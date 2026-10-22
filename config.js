@@ -23,5 +23,7 @@ module.exports = Object.freeze({
   }),
   renderingControlService:
     'urn:schemas-upnp-org:service:RenderingControl:1',
+  avTransportService: 'urn:schemas-upnp-org:service:AVTransport:1',
   slaveListPath: '/httpapi.asp?command=multiroom:getSlaveList',
+  preset: Object.freeze({ minimum: 1, maximum: 12 }),
 });
