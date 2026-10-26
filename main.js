@@ -99,7 +99,7 @@ eventServer.on('error', (error) => {
   logger.error('UPnP callback server error', error);
 });
 
-eventServer.listen(config.callbackPort, async () => {
+eventServer.listen(async () => {
   try {
     const serverAddress = eventServer.address();
     if (!serverAddress) {

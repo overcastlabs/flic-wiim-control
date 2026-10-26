@@ -2,7 +2,6 @@
 
 module.exports = Object.freeze({
   debug: false,
-  callbackPort: 44445,
   healthLogIntervalMs: 5 * 60 * 1000,
   subscription: Object.freeze({
     timeoutSeconds: 10 * 60,
