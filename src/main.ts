@@ -1,28 +1,31 @@
-'use strict';
+import flicapp = require('flicapp');
+import { parseActionMessage } from './action-message';
+import config from './config';
+import { createEventServer } from './event-server';
+import { logger } from './logger';
+import { createSubscriptionManager } from './subscription-manager';
+import { denormalizeVolume, normalizeVolume } from './upnp-protocol';
+import { createController } from './wiim-controller';
+import { createDiscovery } from './wiim-discovery';
+import type { ActionMessage, DeviceMap, WiimDevice } from './types';
+import type {
+  VirtualDeviceMetadata,
+  VirtualDeviceValues,
+} from 'flicapp';
 
-const flicapp = require('flicapp');
-const { parseActionMessage } = require('./action-message');
-const config = require('./config');
-const { createEventServer } = require('./event-server');
-const logger = require('./logger');
-const { createSubscriptionManager } = require('./subscription-manager');
-const { denormalizeVolume, normalizeVolume } = require('./upnp-protocol');
-const { createController } = require('./wiim-controller');
-const { createDiscovery } = require('./wiim-discovery');
-
-const devices = new Map();
-const pendingVolumes = new Map();
+const devices: DeviceMap = new Map();
+const pendingVolumes = new Map<string, number>();
 const controller = createController({ devices });
 
-const applyPendingVolume = (device) => {
+const applyPendingVolume = (device: WiimDevice): void => {
   const volume = pendingVolumes.get(device.name);
-  if (typeof volume !== 'number') {
+  if (volume === undefined) {
     return;
   }
 
   pendingVolumes.delete(device.name);
   logger.info(`Applying queued volume for ${device.name}: ${volume}`);
-  controller.setVolume(device.name, volume);
+  void controller.setVolume(device.name, volume);
 };
 
 const discovery = createDiscovery({
@@ -40,9 +43,12 @@ const eventServer = createEventServer({
   },
 });
 
-const throttle = (handler, delayMs = 125) => {
-  let timer = null;
-  return (...args) => {
+const throttle = <Arguments extends unknown[]>(
+  handler: (...args: Arguments) => void,
+  delayMs = 125,
+): ((...args: Arguments) => void) => {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  return (...args: Arguments): void => {
     if (timer !== null) {
       return;
     }
@@ -53,8 +59,11 @@ const throttle = (handler, delayMs = 125) => {
   };
 };
 
-const handleVolumeUpdate = ({ virtualDeviceId }, { volume }) => {
-  if (!Number.isFinite(volume)) {
+const handleVolumeUpdate = (
+  { virtualDeviceId }: VirtualDeviceMetadata,
+  { volume }: VirtualDeviceValues,
+): void => {
+  if (typeof volume !== 'number' || !Number.isFinite(volume)) {
     logger.error('Ignoring invalid Twist volume update', volume);
     return;
   }
@@ -67,11 +76,11 @@ const handleVolumeUpdate = ({ virtualDeviceId }, { volume }) => {
   }
 
   logger.info(`Twist volume event: ${virtualDeviceId} - ${normalizedVolume}`);
-  controller.setVolume(virtualDeviceId, normalizedVolume);
+  void controller.setVolume(virtualDeviceId, normalizedVolume);
 };
 
-const handleActionMessage = (message) => {
-  let action;
+const handleActionMessage = (message: string): void => {
+  let action: ActionMessage;
   try {
     action = parseActionMessage(message);
   } catch (error) {
@@ -86,10 +95,10 @@ const handleActionMessage = (message) => {
 
   logger.info(`Action message: ${action.deviceId} - ${action.command}`);
   if (action.command === 'preset') {
-    controller.playPreset(action.deviceId, action.preset);
+    void controller.playPreset(action.deviceId, action.preset);
     return;
   }
-  controller.sendTransportCommand(action.deviceId, action.command);
+  void controller.sendTransportCommand(action.deviceId, action.command);
 };
 
 flicapp.on('virtualDeviceUpdate', throttle(handleVolumeUpdate));
@@ -99,10 +108,11 @@ eventServer.on('error', (error) => {
   logger.error('UPnP callback server error', error);
 });
 
+// Omitting the port asks the Hub OS to choose an available ephemeral port.
 eventServer.listen(async () => {
   try {
     const serverAddress = eventServer.address();
-    if (!serverAddress) {
+    if (!serverAddress || typeof serverAddress === 'string') {
       throw new Error('UPnP callback server address is unavailable');
     }
 

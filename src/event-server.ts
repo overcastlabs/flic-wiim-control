@@ -1,15 +1,13 @@
-'use strict';
-
-const net = require('net');
-const logger = require('./logger');
-const { parseEvent } = require('./upnp-protocol');
+import net = require('net');
+import { logger } from './logger';
+import { parseEvent } from './upnp-protocol';
 
 const EMPTY_OK_RESPONSE =
   'HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n';
 const EMPTY_BAD_REQUEST_RESPONSE =
   'HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n';
 
-const isCompleteRequest = (payload) => {
+export const isCompleteRequest = (payload: string): boolean => {
   const headerEnd = payload.indexOf('\r\n\r\n');
   if (headerEnd === -1) {
     return false;
@@ -21,7 +19,13 @@ const isCompleteRequest = (payload) => {
   return payload.length >= headerEnd + 4 + contentLength;
 };
 
-const createEventServer = ({ onVolume }) =>
+interface EventServerOptions {
+  readonly onVolume: (deviceId: string, volume: number) => void;
+}
+
+export const createEventServer = ({
+  onVolume,
+}: EventServerOptions): net.Server =>
   new net.Server((socket) => {
     let payload = '';
     let handled = false;
@@ -42,7 +46,7 @@ const createEventServer = ({ onVolume }) =>
         return;
       }
 
-      if (typeof event.volume === 'number') {
+      if (event.volume !== null) {
         onVolume(event.deviceId, event.volume);
       } else {
         logger.debug(`UPnP event contained no volume change: ${event.deviceId}`);
@@ -50,5 +54,3 @@ const createEventServer = ({ onVolume }) =>
       socket.end(EMPTY_OK_RESPONSE);
     });
   });
-
-module.exports = { createEventServer, isCompleteRequest };

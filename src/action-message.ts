@@ -1,8 +1,7 @@
-'use strict';
+import config from './config';
+import type { ActionMessage, TransportCommand } from './types';
 
-const { preset: presetConfig } = require('./config');
-
-const TRANSPORT_COMMANDS = new Set([
+const TRANSPORT_COMMANDS = new Set<TransportCommand>([
   'play',
   'pause',
   'stop',
@@ -10,22 +9,24 @@ const TRANSPORT_COMMANDS = new Set([
   'previous',
 ]);
 
-const parseActionMessage = (message) => {
+const isTransportCommand = (command: string): command is TransportCommand =>
+  TRANSPORT_COMMANDS.has(command as TransportCommand);
+
+export const parseActionMessage = (message: unknown): ActionMessage => {
   if (typeof message !== 'string') {
     throw new Error('Action message must be a string');
   }
 
   const parts = message.split('|').map((part) => part.trim());
   const deviceId = parts[0];
-  const command = parts[1]?.toLowerCase() === 'prev'
-    ? 'previous'
-    : parts[1]?.toLowerCase();
+  const requestedCommand = parts[1]?.toLowerCase();
+  const command = requestedCommand === 'prev' ? 'previous' : requestedCommand;
 
   if (!deviceId || !command) {
     throw new Error('Expected action message: <device>|<command>[|<value>]');
   }
 
-  if (TRANSPORT_COMMANDS.has(command) && parts.length === 2) {
+  if (isTransportCommand(command) && parts.length === 2) {
     return { deviceId, command };
   }
 
@@ -33,8 +34,8 @@ const parseActionMessage = (message) => {
     const preset = Number(parts[2]);
     if (
       Number.isInteger(preset) &&
-      preset >= presetConfig.minimum &&
-      preset <= presetConfig.maximum
+      preset >= config.preset.minimum &&
+      preset <= config.preset.maximum
     ) {
       return { deviceId, command, preset };
     }
@@ -42,5 +43,3 @@ const parseActionMessage = (message) => {
 
   throw new Error(`Unsupported action message: ${message}`);
 };
-
-module.exports = { parseActionMessage };

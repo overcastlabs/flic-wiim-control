@@ -1,20 +1,18 @@
-'use strict';
-
-const dgram = require('dgram');
-const config = require('./config');
-const { request, rawRequest } = require('./http-client');
-const logger = require('./logger');
-const {
+import dgram = require('dgram');
+import config from './config';
+import { request, rawRequest } from './http-client';
+import { logger } from './logger';
+import {
   parseDeviceDescription,
   parseSsdpHeaders,
   replaceLocationHost,
   splitLocation,
-} = require('./upnp-protocol');
+} from './upnp-protocol';
+import type { DeviceMap, WiimDevice } from './types';
 
-const discoveryTimeoutMs =
-  config.ssdp.maximumWaitSeconds * 1000 + 250;
+const discoveryTimeoutMs = config.ssdp.maximumWaitSeconds * 1000 + 250;
 
-const createSearchMessage = (searchTarget) =>
+const createSearchMessage = (searchTarget: string): Buffer =>
   Buffer.from(
     [
       'M-SEARCH * HTTP/1.1',
@@ -27,7 +25,7 @@ const createSearchMessage = (searchTarget) =>
     ].join('\r\n'),
   );
 
-const isMediaRenderer = (searchTarget) => {
+const isMediaRenderer = (searchTarget?: string): boolean => {
   const normalized = searchTarget?.toLowerCase();
   return Boolean(
     normalized &&
@@ -35,7 +33,7 @@ const isMediaRenderer = (searchTarget) => {
   );
 };
 
-const fetchDescription = async (location) => {
+const fetchDescription = async (location: string): Promise<WiimDevice | null> => {
   try {
     const response = await request({ url: location, method: 'GET' });
     return parseDeviceDescription(response.content, location);
@@ -45,8 +43,25 @@ const fetchDescription = async (location) => {
   }
 };
 
-const createDiscovery = ({ devices, onDeviceDiscovered }) => {
-  const register = (device) => {
+interface DiscoveryOptions {
+  readonly devices: DeviceMap;
+  readonly onDeviceDiscovered?: (device: WiimDevice) => void;
+}
+
+interface GroupedDevice {
+  readonly ip?: string;
+  readonly name?: string;
+}
+
+interface GroupTopology {
+  readonly slave_list?: GroupedDevice[];
+}
+
+export const createDiscovery = ({
+  devices,
+  onDeviceDiscovered,
+}: DiscoveryOptions) => {
+  const register = (device: WiimDevice | null): boolean => {
     if (!device) {
       return false;
     }
@@ -60,13 +75,11 @@ const createDiscovery = ({ devices, onDeviceDiscovered }) => {
 
     devices.set(device.name, device);
     logger.info(`Discovered WiiM device: ${device.name} (${device.baseUrl})`);
-    if (onDeviceDiscovered) {
-      onDeviceDiscovered(device);
-    }
+    onDeviceDiscovered?.(device);
     return true;
   };
 
-  const fetchGroupedDevices = async (master) => {
+  const fetchGroupedDevices = async (master: WiimDevice): Promise<void> => {
     const location = splitLocation(master.location);
     if (!location) {
       return;
@@ -80,7 +93,7 @@ const createDiscovery = ({ devices, onDeviceDiscovered }) => {
         rejectUnauthorized: false,
         timeoutMs: 10000,
       });
-      const topology = JSON.parse(response.content);
+      const topology = JSON.parse(response.content) as GroupTopology;
       const slaves = Array.isArray(topology.slave_list)
         ? topology.slave_list
         : [];
@@ -92,7 +105,9 @@ const createDiscovery = ({ devices, onDeviceDiscovered }) => {
 
         const slaveLocation = replaceLocationHost(master.location, slave.ip);
         if (!slaveLocation) {
-          logger.error(`Unable to construct UPnP location for ${slave.name}`);
+          logger.error(
+            `Unable to construct UPnP location for ${slave.name || slave.ip}`,
+          );
           continue;
         }
         register(await fetchDescription(slaveLocation));
@@ -102,14 +117,14 @@ const createDiscovery = ({ devices, onDeviceDiscovered }) => {
     }
   };
 
-  const discoverGroups = async () => {
+  const discoverGroups = async (): Promise<void> => {
     const visibleDevices = Array.from(devices.values());
     for (const master of visibleDevices) {
       await fetchGroupedDevices(master);
     }
   };
 
-  const sendSearches = (socket, label) => {
+  const sendSearches = (socket: dgram.Socket, label: string): void => {
     config.ssdp.searchTargets.forEach((target) => {
       logger.debug(`Sending ${label} SSDP search for ${target}`);
       const message = createSearchMessage(target);
@@ -123,17 +138,17 @@ const createDiscovery = ({ devices, onDeviceDiscovered }) => {
     });
   };
 
-  const discover = (timeoutMs = discoveryTimeoutMs) => {
+  const discover = (timeoutMs = discoveryTimeoutMs): Promise<DeviceMap> => {
     logger.info(`Starting WiiM SSDP discovery (timeout ${timeoutMs}ms)`);
     devices.clear();
 
     return new Promise((resolve) => {
       const socket = dgram.createSocket({ type: 'udp4', reuseAddr: true });
-      const locations = new Set();
-      const pendingDescriptions = new Set();
+      const locations = new Set<string>();
+      const pendingDescriptions = new Set<Promise<boolean>>();
       let finalized = false;
 
-      const finalize = () => {
+      const finalize = (): void => {
         if (finalized) {
           return;
         }
@@ -147,7 +162,7 @@ const createDiscovery = ({ devices, onDeviceDiscovered }) => {
 
         Promise.all(Array.from(pendingDescriptions))
           .then(discoverGroups)
-          .catch((error) => logger.error('WiiM discovery failed', error))
+          .catch((error: unknown) => logger.error('WiiM discovery failed', error))
           .finally(() => {
             logger.info(`WiiM discovery complete (found ${devices.size})`);
             resolve(devices);
@@ -168,7 +183,7 @@ const createDiscovery = ({ devices, onDeviceDiscovered }) => {
 
         const pending = fetchDescription(location).then(register);
         pendingDescriptions.add(pending);
-        pending.finally(() => pendingDescriptions.delete(pending));
+        void pending.finally(() => pendingDescriptions.delete(pending));
       });
 
       socket.on('error', (error) => {
@@ -194,5 +209,3 @@ const createDiscovery = ({ devices, onDeviceDiscovered }) => {
 
   return { discover };
 };
-
-module.exports = { createDiscovery };

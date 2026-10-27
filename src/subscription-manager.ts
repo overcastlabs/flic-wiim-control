@@ -1,40 +1,73 @@
-'use strict';
+import type { AddressInfo } from 'net';
+import config from './config';
+import { rawRequest } from './http-client';
+import { logger } from './logger';
+import { getHubAddress } from './network-utils';
+import { getHeaderValue, toTimeoutHeader } from './upnp-protocol';
+import type { DeviceMap } from './types';
 
-const config = require('./config');
-const { rawRequest } = require('./http-client');
-const logger = require('./logger');
-const { getHubAddress } = require('./network-utils');
-const { getHeaderValue, toTimeoutHeader } = require('./upnp-protocol');
-
-const STATE = Object.freeze({
+const STATE = {
   idle: 'idle',
   subscribing: 'subscribing',
   subscribed: 'subscribed',
   renewing: 'renewing',
   retrying: 'retrying',
   failed: 'failed',
-});
+} as const;
 
-const createSubscriptionManager = ({ devices }) => {
-  const subscriptions = new Map();
-  let callbackServerAddress = null;
+type SubscriptionState = (typeof STATE)[keyof typeof STATE];
 
-  const getRecord = (deviceId) => {
-    if (!subscriptions.has(deviceId)) {
-      subscriptions.set(deviceId, {
+interface SubscriptionRecord {
+  state: SubscriptionState;
+  retryCount: number;
+  sid: string | null;
+  serverAddress: AddressInfo | null;
+  timer: ReturnType<typeof setTimeout> | null;
+}
+
+interface SubscriptionManagerOptions {
+  readonly devices: DeviceMap;
+}
+
+type RecordUpdates = Partial<Omit<SubscriptionRecord, 'state'>>;
+type RetryAction = () => void | Promise<void>;
+type Subscribe = (
+  deviceId: string,
+  serverAddress?: AddressInfo | null,
+) => Promise<void>;
+
+export const createSubscriptionManager = ({
+  devices,
+}: SubscriptionManagerOptions) => {
+  const subscriptions = new Map<string, SubscriptionRecord>();
+  let callbackServerAddress: AddressInfo | null = null;
+
+  const getRecord = (deviceId: string): SubscriptionRecord => {
+    let record = subscriptions.get(deviceId);
+    if (!record) {
+      record = {
         state: STATE.idle,
         retryCount: 0,
         sid: null,
         serverAddress: null,
         timer: null,
-      });
+      };
+      subscriptions.set(deviceId, record);
     }
-    return subscriptions.get(deviceId);
+    return record;
   };
 
-  const transition = (deviceId, state, updates = {}) => {
+  const transition = (
+    deviceId: string,
+    state: SubscriptionState,
+    updates: RecordUpdates = {},
+  ): SubscriptionRecord => {
     const record = getRecord(deviceId);
-    if (record.timer && updates.timer !== undefined && updates.timer !== record.timer) {
+    if (
+      record.timer &&
+      updates.timer !== undefined &&
+      updates.timer !== record.timer
+    ) {
       clearTimeout(record.timer);
     }
 
@@ -43,7 +76,11 @@ const createSubscriptionManager = ({ devices }) => {
     return record;
   };
 
-  const scheduleRetry = (deviceId, action, serverAddress) => {
+  const scheduleRetry = (
+    deviceId: string,
+    action: RetryAction,
+    serverAddress: AddressInfo | null,
+  ): void => {
     const record = getRecord(deviceId);
     const retryCount = record.retryCount + 1;
     if (retryCount > config.subscription.maxRetries) {
@@ -54,7 +91,7 @@ const createSubscriptionManager = ({ devices }) => {
 
     const timer = setTimeout(() => {
       transition(deviceId, STATE.retrying, { timer: null, retryCount });
-      action();
+      void action();
     }, config.subscription.retryDelayMs);
 
     transition(deviceId, STATE.retrying, {
@@ -64,7 +101,7 @@ const createSubscriptionManager = ({ devices }) => {
     });
   };
 
-  const renewalStagger = (deviceId) => {
+  const renewalStagger = (deviceId: string): number => {
     let hash = 0;
     for (const character of deviceId) {
       hash =
@@ -74,10 +111,10 @@ const createSubscriptionManager = ({ devices }) => {
     return hash;
   };
 
-  let subscribe;
-  let renew;
+  let subscribe: Subscribe;
+  let renew: (deviceId: string) => Promise<void>;
 
-  const scheduleRenewal = (deviceId) => {
+  const scheduleRenewal = (deviceId: string): void => {
     const delaySeconds = Math.max(
       1,
       config.subscription.timeoutSeconds -
@@ -86,19 +123,23 @@ const createSubscriptionManager = ({ devices }) => {
     );
     const timer = setTimeout(() => {
       transition(deviceId, STATE.renewing, { timer: null });
-      renew(deviceId);
+      void renew(deviceId);
     }, delaySeconds * 1000);
 
     transition(deviceId, STATE.subscribed, { timer, retryCount: 0 });
   };
 
-  renew = async (deviceId) => {
+  renew = async (deviceId: string): Promise<void> => {
     const device = devices.get(deviceId);
     const record = getRecord(deviceId);
     const serverAddress = record.serverAddress || callbackServerAddress;
     if (!device || !record.sid) {
       logger.error(`Unable to renew UPnP subscription for ${deviceId}`);
-      scheduleRetry(deviceId, () => subscribe(deviceId, serverAddress), serverAddress);
+      scheduleRetry(
+        deviceId,
+        () => subscribe(deviceId, serverAddress),
+        serverAddress,
+      );
       return;
     }
 
@@ -123,7 +164,10 @@ const createSubscriptionManager = ({ devices }) => {
     }
   };
 
-  subscribe = async (deviceId, serverAddress = callbackServerAddress) => {
+  subscribe = async (
+    deviceId: string,
+    serverAddress = callbackServerAddress,
+  ): Promise<void> => {
     const device = devices.get(deviceId);
     if (!device) {
       logger.error(`Unable to subscribe unknown device: ${deviceId}`);
@@ -137,7 +181,11 @@ const createSubscriptionManager = ({ devices }) => {
     const hubAddress = getHubAddress();
     if (!hubAddress) {
       logger.error('Flic Hub network address is unavailable');
-      scheduleRetry(deviceId, () => subscribe(deviceId, serverAddress), serverAddress);
+      scheduleRetry(
+        deviceId,
+        () => subscribe(deviceId, serverAddress),
+        serverAddress,
+      );
       return;
     }
 
@@ -168,18 +216,22 @@ const createSubscriptionManager = ({ devices }) => {
       scheduleRenewal(deviceId);
     } catch (error) {
       logger.error(`Unable to subscribe to ${deviceId}`, error);
-      scheduleRetry(deviceId, () => subscribe(deviceId, serverAddress), serverAddress);
+      scheduleRetry(
+        deviceId,
+        () => subscribe(deviceId, serverAddress),
+        serverAddress,
+      );
     }
   };
 
-  const subscribeAll = async (serverAddress) => {
+  const subscribeAll = async (serverAddress: AddressInfo): Promise<void> => {
     callbackServerAddress = serverAddress;
     for (const deviceId of devices.keys()) {
       await subscribe(deviceId, serverAddress);
     }
   };
 
-  const activeCount = () => {
+  const activeCount = (): number => {
     let count = 0;
     for (const subscription of subscriptions.values()) {
       if (subscription.state === STATE.subscribed) {
@@ -191,5 +243,3 @@ const createSubscriptionManager = ({ devices }) => {
 
   return { activeCount, subscribe, subscribeAll };
 };
-
-module.exports = { createSubscriptionManager };

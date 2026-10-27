@@ -1,10 +1,11 @@
-'use strict';
+import http = require('http');
+import { logger } from './logger';
+import * as rawHttp from './raw-http';
+import type { HttpRequestOptions, HttpResponse } from './types';
 
-const http = require('http');
-const logger = require('./logger');
-const rawHttp = require('./raw-http');
-
-const assertSuccess = (response) => {
+const assertSuccess = (
+  response: HttpResponse | null | undefined,
+): HttpResponse => {
   if (!response || response.statusCode !== 200) {
     const status = response
       ? `${response.statusCode} ${response.statusMessage || ''}`.trim()
@@ -14,13 +15,17 @@ const assertSuccess = (response) => {
   return response;
 };
 
-const request = (options) => {
+export const request = (options: HttpRequestOptions): Promise<HttpResponse> => {
   logger.debug('HTTP request:', JSON.stringify(options, null, '  '));
 
   return new Promise((resolve, reject) => {
     http.makeRequest(options, (error, response) => {
       if (error || !response) {
-        reject(error instanceof Error ? error : new Error(String(error || 'No response')));
+        reject(
+          error instanceof Error
+            ? error
+            : new Error(String(error || 'No response')),
+        );
         return;
       }
 
@@ -33,9 +38,9 @@ const request = (options) => {
   });
 };
 
-const rawRequest = async (options) => {
+export const rawRequest = async (
+  options: HttpRequestOptions,
+): Promise<HttpResponse> => {
   logger.debug('Raw HTTP request:', JSON.stringify(options, null, '  '));
   return assertSuccess(await rawHttp.makeRequest(options));
 };
-
-module.exports = { request, rawRequest };

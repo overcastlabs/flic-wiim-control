@@ -16,31 +16,53 @@ UPnP volume events, and sends RenderingControl actions for Flic Twist changes.
 
 ## Files
 
-- `main.js` — application lifecycle and Flic event wiring.
-- `action-message.js` — validation for configured Flic action messages.
-- `config.js` — user-facing runtime configuration.
-- `wiim-discovery.js` — SSDP and grouped-device discovery.
-- `wiim-controller.js` — UPnP RenderingControl actions.
-- `subscription-manager.js` — subscription state, renewal, and retry logic.
-- `event-server.js` — inbound UPnP notification server.
-- `upnp-protocol.js` — pure protocol parsing and serialization helpers.
-- `http-client.js` — checked wrappers around Flic and raw HTTP clients.
-- `raw-http.js` — TCP/TLS HTTP implementation for arbitrary verbs.
-- `network-utils.js` — Flic Hub interface-address selection.
+- `src/` — typed application, discovery, protocol, and network source.
+- `types/flic/` — hand-authored declarations for Flic Hub runtime modules.
+- `config-header.ts` — checked runtime configuration injected into each build.
+- `tests/` — protocol and action-message regression tests.
+- `scripts/` — release bundling and TypeScript test execution.
+- `dist/main.js` — generated, minified Flic Hub release entry point.
+- `dist/main.debug.js` — generated, readable entry point for troubleshooting.
+
+## Build
+
+Node.js 20 or later is required for development. Yarn 4.18.1 is pinned in the
+repository through `yarnPath`; Corepack or an existing Yarn launcher will use
+that version automatically. If the `yarn` command is unavailable, invoke
+`.yarn/releases/yarn-4.18.1.cjs` with Node directly. Install the locked
+development dependencies and build the release artifacts:
+
+```sh
+yarn install --immutable
+yarn build
+```
+
+The build type-checks the project, bundles all local modules, leaves Flic's
+built-in modules as runtime imports, and writes `dist/main.js`,
+`dist/main.debug.js`, and `dist/module.json`. The Flic manifest is generated
+from `flicHub.name` and `version` in `package.json`.
 
 ## Installation
 
-Copy the JavaScript files and `module.json` into one Flic Hub Studio module.
-Create matching `Speaker` virtual devices in the Flic app; their IDs must match
-the WiiM friendly names reported during discovery.
+Copy `dist/main.js` and `dist/module.json` into a Flic Hub Studio module. Create
+matching `Speaker` virtual devices in the Flic app; their IDs must match the
+WiiM friendly names reported during discovery.
 
 Start `main.js` with **Restart after crash** enabled. Successful startup logs the
 number of discovered devices followed by one subscription per device.
 
+For readable stack traces during development, upload `dist/main.debug.js` as
+`main.js` instead of the minified release artifact.
+
 ## Configuration
 
-Runtime constants are centralized in `config.js`. The defaults use callback
-port `44445`, ten-minute UPnP subscriptions, and a five-minute health log.
+Runtime constants are centralized in `config-header.ts`. The build preserves
+that object, unminified, at the top of the generated `main.js`. Change the source
+configuration and rebuild instead of editing generated files in the repository.
+
+The callback server asks the Hub operating system for an available ephemeral
+port at startup. The defaults use ten-minute UPnP subscriptions and a
+five-minute health log.
 
 WiiM's local topology API uses a device-generated TLS certificate. Certificate
 verification is disabled only for that LAN topology request; UPnP device
@@ -69,13 +91,18 @@ provide a way to create, edit, or reorder presets.
 
 ## Tests
 
-The pure protocol tests run with Node.js and do not access the local network:
+The type checker and pure protocol tests run with Node.js and do not access the
+local network:
 
 ```sh
-node tests/action-message.test.js
-node tests/upnp-protocol.test.js
+yarn test
 ```
 
-The Flic-specific modules are additionally checked for JavaScript syntax during
-development. Runtime integration requires a Flic Hub because its built-in
-modules differ from Node.js.
+Run the complete release verification, including both generated bundles, with:
+
+```sh
+yarn check
+```
+
+Runtime integration still requires a Flic Hub because its built-in modules
+differ from Node.js.

@@ -1,15 +1,21 @@
-'use strict';
+import net = require('net');
+import tls = require('tls');
+import type { HttpRequestOptions, HttpResponse } from './types';
 
-const net = require('net');
-const tls = require('tls');
+interface HttpTarget {
+  readonly protocol: 'http' | 'https';
+  readonly host: string;
+  readonly port: number;
+  readonly path: string;
+}
 
-const parseHttpUrl = (url) => {
+const parseHttpUrl = (url: string): HttpTarget => {
   const match = /^(https?):\/\/([^/:]+)(?::(\d+))?(\/.*)?$/.exec(url);
   if (!match) {
     throw new Error(`Invalid HTTP URL: ${url}`);
   }
 
-  const protocol = match[1];
+  const protocol = match[1] as HttpTarget['protocol'];
   return {
     protocol,
     host: match[2],
@@ -18,16 +24,20 @@ const parseHttpUrl = (url) => {
   };
 };
 
-const parseResponseHead = (head) => {
+const parseResponseHead = (
+  head: string,
+): Omit<HttpResponse, 'content'> => {
   const lines = head.split('\r\n');
-  const statusLine = lines.shift();
-  const statusMatch = /^HTTP\/\d(?:\.\d)?\s+(\d{3})(?:\s+(.*))?$/.exec(statusLine);
+  const statusLine = lines.shift() ?? '';
+  const statusMatch = /^HTTP\/\d(?:\.\d)?\s+(\d{3})(?:\s+(.*))?$/.exec(
+    statusLine,
+  );
 
   if (!statusMatch) {
     throw new Error(`Invalid HTTP response status: ${statusLine || '<empty>'}`);
   }
 
-  const headers = {};
+  const headers: Record<string, string> = {};
   lines.forEach((line) => {
     const separator = line.indexOf(':');
     if (separator === -1) {
@@ -50,9 +60,11 @@ const parseResponseHead = (head) => {
  * Sends one HTTP/1.1 request over a raw Flic TCP or TLS socket.
  * Intended for verbs, such as SUBSCRIBE, rejected by `http.makeRequest`.
  */
-const makeRequest = (options) =>
+export const makeRequest = (
+  options: HttpRequestOptions,
+): Promise<HttpResponse> =>
   new Promise((resolve, reject) => {
-    let target;
+    let target: HttpTarget;
     try {
       target = parseHttpUrl(options.url);
     } catch (error) {
@@ -62,8 +74,8 @@ const makeRequest = (options) =>
 
     const method = options.method || 'GET';
     const content = options.content || '';
-    const headers = Object.assign({}, options.headers || {});
-    const hasHeader = (name) =>
+    const headers: Record<string, string | number> = { ...options.headers };
+    const hasHeader = (name: string): boolean =>
       Object.keys(headers).some((key) => key.toLowerCase() === name);
 
     if (!hasHeader('host')) {
@@ -85,12 +97,12 @@ const makeRequest = (options) =>
       content,
     ].join('\r\n');
 
-    let socket;
+    let socket: net.Socket | tls.TLSSocket;
     let response = '';
     let settled = false;
-    let timeoutTimer = null;
+    let timeoutTimer: ReturnType<typeof setTimeout> | null = null;
 
-    const fail = (error) => {
+    const fail = (error: unknown): void => {
       if (settled) {
         return;
       }
@@ -101,7 +113,7 @@ const makeRequest = (options) =>
       reject(error instanceof Error ? error : new Error(String(error)));
     };
 
-    const finish = () => {
+    const finish = (): void => {
       if (settled) {
         return;
       }
@@ -111,7 +123,7 @@ const makeRequest = (options) =>
         return;
       }
 
-      let result;
+      let result: Omit<HttpResponse, 'content'>;
       try {
         result = parseResponseHead(response.slice(0, headerEnd));
       } catch (error) {
@@ -120,9 +132,9 @@ const makeRequest = (options) =>
         return;
       }
 
-      const content = response.slice(headerEnd + 4);
+      const responseContent = response.slice(headerEnd + 4);
       const contentLength = Number(result.headers['content-length'] || 0);
-      if (content.length < contentLength) {
+      if (responseContent.length < contentLength) {
         return;
       }
 
@@ -130,12 +142,14 @@ const makeRequest = (options) =>
       if (timeoutTimer !== null) {
         clearTimeout(timeoutTimer);
       }
-      result.content = content.slice(0, contentLength || content.length);
-      resolve(result);
+      resolve({
+        ...result,
+        content: responseContent.slice(0, contentLength || responseContent.length),
+      });
       socket.destroy();
     };
 
-    const attachListeners = () => {
+    const attachListeners = (): void => {
       socket.on('data', (data) => {
         // Some Flic Hub firmware exposes Buffer data but not Socket#setEncoding,
         // despite setEncoding being present in newer SDK documentation.
@@ -146,7 +160,11 @@ const makeRequest = (options) =>
       socket.on('end', () => {
         finish();
         if (!settled) {
-          fail(new Error('Connection ended before a complete HTTP response was received'));
+          fail(
+            new Error(
+              'Connection ended before a complete HTTP response was received',
+            ),
+          );
         }
       });
     };
@@ -178,5 +196,3 @@ const makeRequest = (options) =>
       socket.destroy();
     }, timeoutMs);
   });
-
-module.exports = { makeRequest };
