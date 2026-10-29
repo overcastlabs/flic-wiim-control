@@ -104,5 +104,30 @@ Run the complete release verification, including both generated bundles, with:
 yarn check
 ```
 
+## Releases
+
+Create a release from a clean working tree with one of the following commands:
+
+```sh
+yarn release patch
+yarn release minor
+yarn release major
+```
+
+The command updates the version in `package.json`, runs the complete release
+check, creates a `REL: vX.Y.Z` commit and annotated tag, and pushes both to
+`origin`. You can also specify an exact stable version, such as
+`yarn release 2.0.0`.
+
+Pushing the tag runs the GitHub release workflow. It verifies that the tag and
+package version match, builds the module from a clean checkout, and publishes
+`flic-wiim-control-X.Y.Z.zip` containing `main.js` and `module.json`.
+
+To prepare the release commit and tag without pushing them, append `--no-push`:
+
+```sh
+yarn release patch --no-push
+```
+
 Runtime integration still requires a Flic Hub because its built-in modules
 differ from Node.js.

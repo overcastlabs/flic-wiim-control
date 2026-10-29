@@ -9,6 +9,10 @@
   "scripts": {
     "build": "yarn typecheck && node scripts/build.mjs",
     "check": "yarn test && yarn build && node --check dist/main.js && node --check dist/main.debug.js",
+    "release": "node scripts/release.mjs",
+    "release:major": "yarn release major",
+    "release:minor": "yarn release minor",
+    "release:patch": "yarn release patch",
     "test": "yarn typecheck && node scripts/test.mjs",
     "typecheck": "tsc --noEmit"
   },
